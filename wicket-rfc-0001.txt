@@ -1,0 +1,688 @@
+Apache Wicket                                         Martijn Dashorst
+Request for Comments: 0001                             Emond Papegaaij
+Status: draft
+ 
+ 
+           Modernize PageParameter Processing -- Wicket 7
+ 
+Status of this Memo
+ 
+  This RFC is still under development. The naming of annotations,
+  methods and other concepts are not final.
+ 
+Abstract
+ 
+  Apache Wicket is an open source Java component oriented web
+  application framework. This document specifies modernization to the
+  way Wicket handles PageParameters in the processing of requests and
+  the lifecycle of Page components, based on the specifications done
+  for JAX-RS (JSR-311 and JSR-339).
+ 
+Table of Contents
+ 
+   1. Introduction
+   1.1 Rationale
+   1.1.1 History of PageParameters
+   1.1.2 A critique of PageParameters
+   1.1.3 How Other Web Technologies Work
+   1.1.4 Wicketstuff restannotations
+   1.1.5 Relevant JIRA Issues
+   1.2 Terminology
+   1.3 Other Discussion Topics
+   2. Examples
+   2.1 Page constructor request parameter binding
+   2.2 Page field request parameter binding
+   2.3 Custom type parameters
+   3 Paths
+   3.1 Path annotation
+   3.2 Registering pages
+   3.3 Registering pages automatically
+   4 Parameters
+   4.1 Parameter Injection points
+   4.1.1 Components, Pages, Behaviors and Models
+   4.1.2 Allowable Parameter Types
+   4.2 Path parameters
+   4.3 Query parameters
+   4.4 Bean parameters
+   5 Links and URLs
+   6 Resources
+   7 Legacy Migration
+   7.1 Removed API replacements
+   7.1.1 Page#getPageParameters() method removed
+   7.1.2 Page Constructor taking PageParameters removed
+   7.1.3 setResponsePage(Class<?>, PageParameters) removed
+ 
+1. Introduction
+ 
+1.1 Rationale
+ 
+  In Wicket versions prior to the implementation of this RFC the
+  concept of PageParameters was used to provide access to request
+  parameters, and to construct URLs to pages that are bookmarkable by
+  clients, externalizing the essential state to (re-)construct the
+  page.
+ 
+1.1.1 History of PageParameters
+ 
+  The concept was introduced prior to the first major release of
+  Wicket, and hasn't seen much evolution since. With the rising
+  popularity of REST-ful URLs in applications, the importance of the
+  PageParameters and its surrounding concepts increased.
+ 
+  To create a page that can be bookmarked by clients with the
+  essential state encoded in the bookmarkable URL, one has to
+  implement a page constructor with PageParameters as the only
+  argument:
+  
+    public CheesePage(PageParameters pars) {
+      super(pars);
+      
+      String name = pars.getValues("name").toString();
+      Cheese cheese = cheeseDao.byName(name);
+      ... do something with the cheese
+    }
+ 
+  To construct a link to this page one creates a BookmarkablePageLink:
+  
+    PageParameters pars = new PageParameters();
+    pars.add("name", "Bluxton Blue");
+    add(new BookmarkablePageLink<>("cheese", CheesePage.class, pars));
+ 
+  To issue a redirect to this page one sets the response page:
+  
+    PageParameters pars = new PageParameters();
+    pars.add("name", "Bluxton Blue");
+    setResponsePage(CheesePage.class, pars);
+ 
+1.1.2 A critique of PageParameters
+  
+  It is the opinion of the authors that the API provided by the
+  PageParameters has run its course when compared to newer APIs
+  provided by other Java web technologies such as JAX-RS (JSR-311,
+  JSR-339).
+ 
+  The way pages are constructed using PageParameters hides the public
+  interface of constructing the page: it is unclear which parameters
+  are required to successfully construct the page:
+  
+    public EmployeePage(PageParameters pars) {}
+  
+  What are the parameters that are necessary to construct an URL to
+  the EmployeePage in this example? One has to parse the
+  PageParameter extraction code to construct the names and possible
+  values for each parameter:
+  
+    public EmployeePage(PageParameters pars) {
+        long companyId = pars.getValues(0).toLong();
+        long employeeNumber = pars.getValues("empNr").toLong();
+        String manager = pars.getValues("mgr").toOptionalString();
+    }
+ 
+  The retrieved values from the PageParameters are always primitives,
+  which have to be converted by hand to useful types.
+ 
+  Creating a bookmarkable link to a page requires the use of
+  PageParameters, even if the page would only require merely a string
+  parameter:
+  
+    PageParameters pars = new PageParameters();
+    pars.add("name", name);
+    add(new BookmarkablePageLink<>("cheese", CheesePage.class, pars));
+ 
+  But knowing that the parameter has to be named "name" is not
+  apparent by the CheesePage constructor arguments.
+  
+  Registering the page with Wicket under a certain REST-ful URL is
+  not local to the page, but centralized in the Application:
+  
+    @Override
+    protected void init() {
+      ...
+      mountPage("/cheese/${name}", CheesePage.class);
+      mountPage("/${company}/employee/${empNr}/#{mgr}", 
+                                               EmployeePage.class);
+    }
+ 
+  This has the benefit of having all URL templates in one place, but
+  it makes it even harder still to actually know how the page's URL
+  looks like.
+ 
+1.1.3 How Other Web Technologies Work
+ 
+  The main technology that inspired this RFC is JAX-RS. JAX-RS is a
+  Java API for RESTful Web Services. It uses Java annotations to
+  define a RESTful API.
+  
+  Here's an simple example of JAX-RS in action.
+  
+    @Path("/helloworld")
+    @Produces(MediaType.TEXT_PLAIN)
+    public HelloWorldResource {
+      @GET
+      public String get() {
+        return "Hello, World!";
+      }
+    }
+  
+  In this example we specify that this resources is published at the
+  URL "/helloworld". We further specify that this resource will
+  producte "text/plain" responses. Finally we tell JAX-RS that the
+  get() method responds to HTTP-GET requests.
+ 
+  JAX-RS allows the injection of request parameters into the resource,
+  either as fields or method parameters.
+ 
+    public CheesesResource {
+      @GET 
+      @Path("/cheeses/{name}")
+      public Cheese byName(@PathParam("name") String name) {
+        return cheeseDao.findOneByName(name);
+      }
+    }
+ 
+  JAX-RS also allows the automatic conversion of custom types in the
+  resource parameters:
+  
+  - @PathParam("zipcode") ZipCode code
+  - @QueryParam("email") EmailAddress email
+  
+  You can also provide a default value:
+  
+    @QueryParam("email") 
+    @DefaultValue("example@example.com") 
+    private EmailAddress email;
+ 
+  For groups of parameters that are used in conjunction often, you can
+  use @BeanParam to populate a bean:
+  
+    public class QueryBean {
+      @QueryParam("q")
+      public String q;
+    }
+    
+    @Path("/search")
+    public class SearchResource {
+      @GET
+      public String search(@BeanParam QueryBean params) {
+      }
+    }
+ 
+1.1.4 Wicketstuff restannotations
+ 
+  Andrea del Bene has created a project at WicketStuff called
+  restannotations. This project has implemented the JAX-RS annotation
+  based parameters and made it possible to create Wicket resources
+  based on JAX-RS principles. It does not provide the parameter
+  processing to Pages.
+  
+  See http://s.apache.org/wicketstuff-restannotations for more
+  information.
+ 
+1.1.5 Relevant JIRA Issues
+ 
+  WICKET-4441
+    PageProvider should create a new Page instance if PageParameters
+    are changed, even if a stored page exists
+ 
+    https://issues.apache.org/jira/browse/WICKET-4441
+ 
+1.2 Terminology
+ 
+  This specification uses a number of concepts and terms used in
+  Wicket.
+ 
+  page
+     an instance of a class that extends WebPage
+     
+  bookmarkable page
+     a page that can be constructed based solely on the information
+     contained in the URL, and requires no prior state on the server
+ 
+  stateless page
+     a page that has no callbacks to itself
+ 
+1.3 Other Discussion Topics
+ 
+  Other interesting topics that may need to be addressed in this
+  document:
+ 
+   - naming of annotations: import JAX-RS api, follow jax-rs or use 
+     our own names?
+   - ajax requests vs full page refreshes
+   - history api?
+   - websockets?
+   - post vs get parameters, multi-part?, forms
+   - resources?
+  
+2. Examples
+ 
+  First a couple of examples to show the modernized way of using
+  parameters in the construction and life cycle of a page.
+ 
+2.1 Page constructor request parameter binding
+ 
+  This Hello, World example will show a greeting to a person based on
+  a query parameter that provides the name of the person:
+ 
+    @Path("/hello") // #1
+    public class HelloWorldPage extends WebPage {
+      public HelloWorldPage(@QueryParam("name") String name) { // #2
+        add(new Label("name", name));
+      }
+    }
+ 
+  First we specify the mount point of the page in the mount path
+  (#1). In this case we state that the page is mounted under '/hello'.
+ 
+  Next we specify in the constructor arguments the parameter that
+  Wicket will retrieve from the query parameters embedded in the
+  request (#2).
+  
+  The rest of the example sets up a label to show the greeting.
+ 
+  Executing the example by performing a GET on the mounted URL results
+  in the following response:
+  
+    GET http://example.com/hello?name=John
+  
+    200 OK
+    <h1>Hello, <span>John</span></h1>
+ 
+  This page is completely stateless and can be returned to the browser
+  in the same request without having to redirect to a stateful URI.
+ 
+2.2 Page field request parameter binding
+ 
+  The following example will perform the same task as the example
+  from 2.1 but this time use a field of the page to store the request
+  parameter:
+ 
+    @Path("/hello")
+    public class HelloWorldPage extends WebPage {
+      @QueryParam("name")
+      private String name;
+      
+      public HelloWorldPage() {
+        add(new Label("name", name));
+      }
+    }
+ 
+  So instead of providing the parameter in the constructor, it is
+  stored and injected in a field.
+ 
+  When the browser request this page using the bookmarkable URL,
+  Wicket will just render the page as it is stateless:
+  
+    GET http://example.com/hello?name=John
+  
+    200 OK
+    <h1>Hello, <span>John</span></h1>
+ 
+  Subsequent requests with a different name will create new pages and
+  use the new name as a parameter:
+ 
+    GET http://example.com/hello?name=Mary
+    
+    200 OK
+    <h1>Hello, <span>Mary</span></h1>
+ 
+2.3 Custom type parameters
+ 
+  If we want to retrieve a customer based on a social security number
+  (SSN) we can use that type directly and let Wicket handle the
+  conversion from string to Ssn-provided Ssn fulfills the contract
+  for automatic conversion:
+ 
+    public class Ssn {
+      public Ssn(String value) { ... }
+    }
+ 
+    @Path("/customer/{ssn}")
+    public class CustomerPage extends WebPage {
+      public CustomerPage(@PathParam("ssn") Ssn ssn) {
+        ... do something with the social security number
+      }
+    }
+  
+  Since Ssn has a constructor taking a single parameter of type
+  String, Wicket can automatically convert a String to the correct
+  Ssn type, and as such we can use Ssn directly as an injectable
+  parameter.
+ 
+  You can also specify multiple parameters:
+  
+    @Path("/company/{company_id}/employee/{employee_nr}")
+    public class EmployeePage extends WebPage {
+      public EmployeePage(@PathParam("company_id") Long companyId,
+                          @PathParam("employee_nr") EmployeeNr nr) {
+        ... do something with the company id and employee number
+      }
+    }
+ 
+3 Paths
+ 
+3.1 Path annotation
+ 
+  A page can be registered under a path using the @Path annotation.
+  The path expression provided by the annotation's value not only
+  contains the path segments but also the names of parameters.
+  
+  | NB. we should follow the JAX-RS (JSR-339) as close as possible.
+ 
+  The @Path annotation works only on page classes.
+  
+  | NB. Should this work for resources too?
+  
+  @Path annotations are not additive: a @Path annotation that is
+  enclosed by another @Path annotation will not inherit the outer
+  path.
+  
+    @Path("/hello")
+    public class HelloPage extends WebPage {
+      @Path("/world")
+      public static class WorldPage extends WebPage {
+      }
+    }
+ 
+  In this example both pages will be available from the root of the
+  Wicket filter path, using their respective path values:
+  
+    HelloPage is available from http://example.com/hello
+ 
+    WorldPage is available from http://example.com/world    
+ 
+  If a browser would request http://example.com/hello/world it would
+  result in a 404 response.
+  
+  | NB. Should this instead create a HelloPage with world as a free
+  | form parameter? Probably model after how JAX-RS does this.
+ 
+3.2 Registering pages
+ 
+  For Wicket to know about the paths the pages are mounted on, the
+  pages need to be registered. The registration is done in the
+  Application class, similarly how the normal mounting takes place:
+  
+    public class MyApplication extends WebApplication {
+      @Override
+      protected void init() {
+        super.init();
+ 
+        // register individual pages        
+        mount(MyPage1.class);
+        mount(MyPage2.class);
+ 
+        // register all pages in the package and its child packages
+        mountPackage("com.example.web.pages");
+      }
+    }
+ 
+3.3 Registering pages automatically
+ 
+  | NB: This is up for debate: mountPackage is simple enough to not
+  | have to implement a separate scan.
+  
+  Wicket can also perform a classpath scan and detect path
+  annotations automatically.
+ 
+4 Parameters
+ 
+  In the previous example two parameter types were already presented:
+  
+   - path parameters
+   - query parameters
+  
+  JAX-RS also specifies matrix, cookie, header, form and bean
+  parameters. Of these we will only additionally consider bean
+  parameters to be in scope of Wicket.
+ 
+4.1 Parameter Injection points
+ 
+4.1.1 Components, Pages, Behaviors and Models
+ 
+  The only supported injection points for parameters are components,
+  behaviors and pages. This because the life cycle of Models and
+  other non-Wicket related classes are not coupled to Wicket. This is
+  similar to how wicket-inject works.
+ 
+4.1.2 Allowable Parameter Types
+ 
+  The Java type of a parameter must obey one of the following rules:
+  
+  1. be a primitive
+  
+  2. Have a constructor that accepts a single java.lang.String
+     argument
+ 
+  3. Have a static factory method named valueOf or fromString that
+     accepts a single java.lang.String argument
+ 
+  4. Have a registered implementation of IConverter
+  
+  5. Be List<T>, Set<T> or OrderedSet<T> where T satisfies 2 or 3.
+  
+  For parameters that may contain more values for the same name 5 can
+  be used to obtain all the values.
+ 
+4.2 Path parameters
+
+  One can use path segments in the URL to extract parameter values:
+  
+    @Path("/companies/{companyid}")
+    public class CompanyPage extends WebPage {
+      public CompanyPage(@PathParam("companyid") long companyid) {
+          ...
+      }
+    }
+  
+  Here we specify a long parameter for the company identifier which
+  comes right after the path segment that identifies the CompanyPage.
+  
+  It is possible to use multiple parameters in one path:
+  
+    @Path("/{customerid}/devices/{deviceid}")
+    public class RegisteredDevicesPage extends WebPage {
+      public RegisteredDevicesPage(
+                  @PathParam("customerid") CustomerId customerId,
+                  @PathParam("deviceid") String deviceId) {
+        ...
+      }
+    }
+
+  As previously mentioned you can also specify the path parameters as
+  fields in the page class:
+  
+    @Path("/{customerid}/devices/{deviceid}")
+    public class RegisteredDevicesPage extends WebPage {
+      @PathParam("customerid")
+             private CustomerId customerId;
+
+      @PathParam("deviceid")
+      private String deviceId;
+      
+      public RegisteredDevicesPage() {
+        ...
+      }
+    }
+  
+  This does make it harder to discover which parameters are required
+  to construct the page.
+  
+  You can also provide a default value for when the particular value
+  is not in available in the requested URL:
+
+    @Path("/stockprices/{date}")
+    public class StockPricesPage extends WebPage {
+      public StockPricesPage(
+          @PathParam("date") @DefaultValue("today") CustomDate date) {
+         ...
+      }
+    }
+
+  Default values have to be specified in strings, and unfortunately
+  can't be dynamic (a limitation of annotations).
+
+4.3 Query parameters
+
+  Query parameters are parameters that are part of query part of the
+  requested URL. Query parameters are specified similar to path
+  parameters, except with the @QueryParam annotation. They can be
+  injected into fields and constructor parameters, similar to JAX-RS.
+  
+    @Path("/stockprices")
+    public StockPricesPage extends WebPage {
+      @QueryParam("symbol")
+      private String symbol;
+
+      public StockPricesPage(
+         @QueryParam("date") @DefaultValue("today") CustomDate date) {
+        ...
+      }
+    }
+
+  The allowable types for query parameters are the same as outlined
+  in 4.1.2.
+  
+  The query parameter will be null if its name is not part of the
+  query part of the requested URL or if there is no value provided.
+  
+    http://example.com/stockprices?symbol=&date=today
+    http://example.com/stockprices?date=2013-09-01
+
+  In the previous example both URLs will result in a null value for
+  the symbol field.
+ 
+4.4 Bean parameters
+
+  Bean parameters are Java beans (POJOs) that encapsulate other
+  parameters, allowing for easy, typesafe reuse of common parameters.
+  Any bean can be injected as a bean parameter, provided it has a
+  no-arguments constructor or a default constructor.
+
+    public class StockParameters {
+      @QueryParam("symbol")
+      private String symbol;
+
+      @QueryParam("date")
+      @DefaultValue("today") 
+      private CustomDate date
+
+      ... getters/setters
+    }  
+
+    @Path("/stockprices")
+    public StockPricesPage extends WebPage {
+
+      public StockPricesPage(@BeanParam StockParameters params) {
+        if(params.getDate() == null)
+        ...
+      }
+    }
+
+  The parameters injected into the POJO follow the same rules as
+  direct injection.
+  
+5 Links and URLs
+ 
+  Click on Next:
+ 
+    <h1>Hello, <span>Jane</span></h1>
+    <a href="/hello/5678?1-1.ILinkListener-next">Next</a>
+ 
+  Note the updated URL for the next link that includes the new SSN,
+  since it is 'managed' by Wicket, as it is a field injected
+  parameter. Wicket was also able to update the page number since we
+  did a full refresh of the page and the state is stored in a new
+  version.
+ 
+  Constructor based parameter injection
+ 
+  Like JAX-RS it is possible to provide type safe parameters in page
+  constructors
+ 
+    @Path("/hello/{ssn}")
+    public class HelloWorldPage extends WebPage {
+      @Inject
+      private PeopleDao dao;
+    
+      private Ssn ssn; // #1
+    
+      public HelloWorldPage(@PathParam("ssn") Ssn ssn) { // #2
+        // wicket 8 type model
+        add(new Label("name", {Person p = dao.bySsn(ssn); p.getName()}));
+        this.ssn = ssn;
+        add(new Link("next") {
+          @Override
+          public void onClick() {
+            ssn = ssn.next();
+          }
+        });
+      }
+    }
+ 
+  #1 Wicket doesn't know about this field, ignores it for page state
+     URL reconstruction
+   
+  #2 Wicket does know about this value, stores it in page meta data
+     for future URL reconstruction
+ 
+6 AJAX
+ 
+  TODO
+ 
+7 Legacy Migration
+ 
+  For legacy purposes it can be necessary to have access to the old
+  PageParameters implementation, or to have the old functionality
+  available when migrating to this RFC.
+ 
+7.1 Removed API replacements
+ 
+  To ensure a consistent way of constructing pages and links to
+  pages, the commonly used API's using PageParameters in the Wicket
+  core will be replaced with the new way.
+  
+7.1.1 Page#getPageParameters() method removed
+ 
+  The method that retrieves the page parameters that were stored upon
+  creation of the page is removed.
+  
+  If access to the PageParameters cannot (yet) be replaced with the
+  means this RFC provides, the developer can access the
+  PageParameters of this request by querying the Request object:
+  
+    PageParameters pars = getRequestCycle()
+                            .getRequest()
+                            .getPageParameters();
+    ... do something with the parameters
+ 
+  If the parameters used at construction time of the page are
+  necessary in subsequent requests, the developer can retrieve the
+  parameters from the request in to constructor and store them in a
+  field or in the page meta-data.
+ 
+7.1.2 Page Constructor taking PageParameters removed
+ 
+  The constructors of Page and WebPage taking PageParameters are
+  removed. This will cause compilation errors for user pages that
+  call super(PageParameters):
+  
+    public MyPage(PageParameters pars) {
+      super(pars);
+      ... do something with the parameters
+    }
+  
+  The fix is to remove the call to super and the PageParameters
+  parameter to this constructor, and retrieve the PageParameters from
+  the Request object:
+ 
+    public MyPage() {
+      PageParameters pars = getRequestCycle()
+                                 .getRequest()
+                                 .getPageParameters();
+      ... do something with the parameters
+    }
+ 
+7.1.3 setResponsePage(Class<?>, PageParameters) removed
+ 
+  TODO  
